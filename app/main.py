@@ -2417,31 +2417,41 @@ def _startup():
     validate_runtime_env()
     _startup_schema_guard()
 
-    # DB is optional for smoke tests. Production must use Alembic migrations
-    # instead of create_all on startup.
+    # DB is optional for smoke tests. Production should prefer Alembic migrations.
+    # For a brand-new database, ENABLE_STARTUP_CREATE_ALL=true allows a one-time
+    # bootstrap of the base schema so auth/register/login can come up safely.
     if ENGINE is not None:
         if _env_flag("ENABLE_STARTUP_CREATE_ALL", default=False):
             def _do_create_all():
-                from .db import Base  # type: ignore
+                try:
+                    logger.warning("ENABLE_STARTUP_CREATE_ALL=true -> creating schema with SQLAlchemy metadata")
+                except Exception:
+                    pass
+                from .models import Base  # type: ignore
                 Base.metadata.create_all(bind=ENGINE)
-            _run_with_timeout(_do_create_all, "CREATE_ALL", timeout_sec=15)
+                try:
+                    logger.warning("CREATE_ALL finished successfully")
+                except Exception:
+                    pass
+            _run_with_timeout(_do_create_all, "CREATE_ALL", timeout_sec=30)
         else:
             try:
                 logger.info("CREATE_ALL skipped (use Alembic migrations)")
             except Exception:
                 pass
 
-        # Auto-seed Summit codes to avoid manual DB edits in Railway UI.
-        def _do_seed_summit_codes():
+        def _do_post_bootstrap_db_tasks():
             from .db import SessionLocal  # type: ignore
             if SessionLocal is None:
                 return
             db = SessionLocal()
             try:
+                ensure_schema(db)
                 _seed_default_summit_codes(db, org=default_tenant() or "public")
             finally:
                 db.close()
-        _run_with_timeout(_do_seed_summit_codes, "SEED_SUMMIT_CODES", timeout_sec=15)
+
+        _run_with_timeout(_do_post_bootstrap_db_tasks, "POST_BOOTSTRAP_DB_TASKS", timeout_sec=30)
 
     # ADMIN_API_KEY is optional. If not set, admin access is granted only via admin-role JWT.
     # (ADMIN_EMAILS controls who becomes admin on register/login.)
