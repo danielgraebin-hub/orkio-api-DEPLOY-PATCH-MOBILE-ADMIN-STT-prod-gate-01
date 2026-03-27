@@ -6046,6 +6046,13 @@ async def realtime_client_secret(
     # Normalize to supported voices to avoid Realtime mint failures
     voice = normalize_realtime_voice(voice_raw, default=os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
     resolved_language = resolve_stt_language(summit_cfg.get("transcription_language"))
+    auto_response_enabled = str(
+        os.getenv(
+            "OPENAI_REALTIME_AUTO_RESPONSE_ENABLED",
+            os.getenv("REALTIME_AUTO_RESPONSE_ENABLED", "true"),
+        )
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
     session_cfg: Dict[str, Any] = {
         "type": "realtime",
         "model": body.model,
@@ -6053,7 +6060,7 @@ async def realtime_client_secret(
             "output": {"voice": voice},
             # Let the server detect turns for lowest-latency voice UX
             "input": {
-                "turn_detection": {"type": "server_vad", "create_response": False},
+                "turn_detection": {"type": "server_vad", "create_response": auto_response_enabled},
                 # Optional transcription for UI captions / logs
                 "transcription": {
                     **({"language": resolved_language} if resolved_language else {}),
