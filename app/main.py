@@ -5395,17 +5395,17 @@ async def chat_stream(
     # DetachedInstanceError when the SSE stream accesses ORM instances after session expiry.
     target_agents: List[Dict[str, Any]] = [
         {
-            "id": ag_id,
+            "id": ag.id,
             "org_slug": ag.org_slug,
-            "name": ag_name,
+            "name": ag.name,
             "description": getattr(ag, "description", None),
             "system_prompt": getattr(ag, "system_prompt", None),
             "model": getattr(ag, "model", None),
             "temperature": getattr(ag, "temperature", None),
             "rag_enabled": getattr(ag, "rag_enabled", None),
             "rag_top_k": getattr(ag, "rag_top_k", None),
-            "voice_id": ag_voice_id,
-            "avatar_url": ag_avatar_url,
+            "voice_id": getattr(ag, "voice_id", None),
+            "avatar_url": getattr(ag, "avatar_url", None),
             "active": getattr(ag, "active", None),
         }
         for ag in target_agents_rows
@@ -5482,7 +5482,7 @@ async def chat_stream(
                 if active_founder_guidance:
                     system_prompt = (system_prompt + "\n\nFounder guidance (temporary, internal):\n" + active_founder_guidance).strip()
                 model_override = ag_model
-                temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else 0.2) or 0.2
+                temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else  "temperature", 0.2) or 0.2)
 
                 llm_task = asyncio.create_task(
                     asyncio.to_thread(
