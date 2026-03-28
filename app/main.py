@@ -996,6 +996,7 @@ class MessageOut(BaseModel):
     created_at: int
 
 class ChatIn(BaseModel):
+    tenant: str = Field(default_tenant(), min_length=1)
     thread_id: Optional[str] = None
     agent_id: Optional[str] = None
     message: str = Field(min_length=1)
