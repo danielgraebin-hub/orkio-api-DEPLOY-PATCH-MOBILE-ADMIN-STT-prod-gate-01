@@ -4245,12 +4245,12 @@ async def upload(
                     existing = db.execute(
                         select(AgentKnowledge).where(
                             AgentKnowledge.org_slug == org,
-                            AgentKnowledge.agent_id == ag.id,
+                            AgentKnowledge.agent_id == ag_id,
                             AgentKnowledge.file_id == f.id,
                         )
                     ).scalar_one_or_none()
                     if not existing:
-                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag.id, file_id=f.id, created_at=now_ts()))
+                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag_id, file_id=f.id, created_at=now_ts()))
                 db.commit()
 
             # Explicit multi-agent linking
@@ -4262,12 +4262,12 @@ async def upload(
                     existing = db.execute(
                         select(AgentKnowledge).where(
                             AgentKnowledge.org_slug == org,
-                            AgentKnowledge.agent_id == ag.id,
+                            AgentKnowledge.agent_id == ag_id,
                             AgentKnowledge.file_id == f.id,
                         )
                     ).scalar_one_or_none()
                     if not existing:
-                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag.id, file_id=f.id, created_at=now_ts()))
+                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag_id, file_id=f.id, created_at=now_ts()))
                 db.commit()
 
             # Single-agent link (legacy)
@@ -4277,12 +4277,12 @@ async def upload(
                     existing = db.execute(
                         select(AgentKnowledge).where(
                             AgentKnowledge.org_slug == org,
-                            AgentKnowledge.agent_id == ag.id,
+                            AgentKnowledge.agent_id == ag_id,
                             AgentKnowledge.file_id == f.id,
                         )
                     ).scalar_one_or_none()
                     if not existing:
-                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag.id, file_id=f.id, created_at=now_ts()))
+                        db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag_id, file_id=f.id, created_at=now_ts()))
                     db.commit()
         except Exception:
             pass
@@ -4722,12 +4722,12 @@ def admin_approve_file_request(req_id: str, _admin=Depends(require_admin_access)
         existing = db.execute(
             select(AgentKnowledge).where(
                 AgentKnowledge.org_slug == org,
-                AgentKnowledge.agent_id == ag.id,
+                AgentKnowledge.agent_id == ag_id,
                 AgentKnowledge.file_id == f.id,
             )
         ).scalar_one_or_none()
         if not existing:
-            db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag.id, file_id=f.id, created_at=now_ts()))
+            db.add(AgentKnowledge(id=new_id(), org_slug=org, agent_id=ag_id, file_id=f.id, created_at=now_ts()))
 
     r.status = "approved"
     r.resolved_at = now_ts()
@@ -5370,17 +5370,17 @@ async def chat_stream(
     active_founder_guidance = _get_founder_guidance(org, tid, message)
 
     # Resolve target agents
-    target_agents: List[Agent] = []
+    target_agents_rows: List[Agent] = []
     if agent_id:
         a = db.execute(
             select(Agent).where(Agent.id == agent_id, Agent.org_slug == org)
         ).scalar_one_or_none()
         if not a:
             raise HTTPException(404, "agent not found")
-        target_agents = [a]
+        target_agents_rows = [a]
     else:
         # default: pick active agents ordered by created_at
-        target_agents = list(
+        target_agents_rows = list(
             db.execute(
                 select(Agent)
                 .where(Agent.org_slug == org, Agent.active == True)
@@ -5388,8 +5388,28 @@ async def chat_stream(
             ).scalars().all()
         )
 
-    if not target_agents:
+    if not target_agents_rows:
         raise HTTPException(400, "no agents configured")
+
+    # Materialize agent attributes before generator / commit boundaries to avoid
+    # DetachedInstanceError when the SSE stream accesses ORM instances after session expiry.
+    target_agents: List[Dict[str, Any]] = [
+        {
+            "id": ag_id,
+            "org_slug": ag.org_slug,
+            "name": ag_name,
+            "description": getattr(ag, "description", None),
+            "system_prompt": getattr(ag, "system_prompt", None),
+            "model": getattr(ag, "model", None),
+            "temperature": getattr(ag, "temperature", None),
+            "rag_enabled": getattr(ag, "rag_enabled", None),
+            "rag_top_k": getattr(ag, "rag_top_k", None),
+            "voice_id": ag_voice_id,
+            "avatar_url": ag_avatar_url,
+            "active": getattr(ag, "active", None),
+        }
+        for ag in target_agents_rows
+    ]
 
     # Persist user message once (idempotent via client_message_id if provided)
     try:
@@ -5437,22 +5457,32 @@ async def chat_stream(
                 if await request.is_disconnected():
                     return
 
+                ag_id = ag.get("id")
+                ag_name = ag.get("name") or "Agent"
+                ag_voice_id = ag.get("voice_id")
+                ag_avatar_url = ag.get("avatar_url")
+                ag_system_prompt = (ag.get("system_prompt") or "").strip()
+                ag_model = ag.get("model") or None
+                ag_temperature_raw = ag.get("temperature")
+                ag_rag_enabled = bool(ag.get("rag_enabled")) if ag.get("rag_enabled") is not None else True
+                ag_rag_top_k = int(ag.get("rag_top_k") or 0) or 6
+
                 # per-agent status
-                yield sse_event("status", {"phase": "agent", "agent_id": ag.id, "agent_name": ag.name, "agent": ag.name, "status": f"Executando @{ag.name}...", "trace_id": trace_id})
+                yield sse_event("status", {"phase": "agent", "agent_id": ag_id, "agent_name": ag_name, "agent": ag_name, "status": f"Executando @{ag_name}...", "trace_id": trace_id})
 
                 # Build context/prompt and run blocking LLM call in a background thread (major throughput win)
-                agent_file_ids = getattr(ag, "file_ids", None) or []
-                rag_top_k = int(getattr(ag, "rag_top_k", 0) or 0) or 6
+                agent_file_ids = []
+                rag_top_k = ag_rag_top_k
                 effective_top_k = int(top_k or 0) if top_k else rag_top_k
                 try:
                     citations = keyword_retrieve(db, org, message, file_ids=agent_file_ids, top_k=effective_top_k)
                 except Exception:
                     citations = []
-                system_prompt = (getattr(ag, "system_prompt", None) or "").strip()
+                system_prompt = ag_system_prompt
                 if active_founder_guidance:
                     system_prompt = (system_prompt + "\n\nFounder guidance (temporary, internal):\n" + active_founder_guidance).strip()
-                model_override = getattr(ag, "model", None) or None
-                temperature = float(getattr(ag, "temperature", 0.2) or 0.2)
+                model_override = ag_model
+                temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else  "temperature", 0.2) or 0.2)
 
                 llm_task = asyncio.create_task(
                     asyncio.to_thread(
@@ -5520,8 +5550,8 @@ async def chat_stream(
                     # otherwise, continue to next agent
 
                     try:
-                        yield sse_event("error", {"agent_id": ag.id, "code": code or "LLM_ERROR", "message": msg, "error": msg, "trace_id": trace_id})
-                        yield sse_event("agent_done", {"done": True, "agent_id": ag.id, "trace_id": trace_id})
+                        yield sse_event("error", {"agent_id": ag_id, "code": code or "LLM_ERROR", "message": msg, "error": msg, "trace_id": trace_id})
+                        yield sse_event("agent_done", {"done": True, "agent_id": ag_id, "trace_id": trace_id})
                     except Exception:
                         return
                     continue
@@ -5536,7 +5566,7 @@ async def chat_stream(
                         thread_id=tid,
                         role="assistant",
                         content=ans,
-                        agent_id=ag.id,
+                        agent_id=ag_id,
                     )
                     db.add(m_ass)
                     db.commit()
@@ -5554,8 +5584,8 @@ async def chat_stream(
                     except Exception:
                         pass
                     try:
-                        yield sse_event("error", {"agent_id": ag.id, "message": str(db_err), "error": str(db_err), "trace_id": trace_id})
-                        yield sse_event("agent_done", {"done": True, "agent_id": ag.id, "trace_id": trace_id})
+                        yield sse_event("error", {"agent_id": ag_id, "message": str(db_err), "error": str(db_err), "trace_id": trace_id})
+                        yield sse_event("agent_done", {"done": True, "agent_id": ag_id, "trace_id": trace_id})
                     except Exception:
                         return
                     continue
@@ -5570,8 +5600,8 @@ async def chat_stream(
                         yield sse_event(
                             "chunk",
                             {
-                                "agent_id": ag.id,
-                                "agent_name": ag.name,
+                                "agent_id": ag_id,
+                                "agent_name": ag_name,
                                 "content": chunk,
                                 "delta": chunk,
                                 "thread_id": tid,
@@ -5582,7 +5612,7 @@ async def chat_stream(
                         return
 
                 try:
-                    yield sse_event("agent_done", {"done": True, "agent_id": ag.id, "thread_id": tid, "trace_id": trace_id})
+                    yield sse_event("agent_done", {"done": True, "agent_id": ag_id, "thread_id": tid, "trace_id": trace_id})
                 except Exception:
                     return
 
