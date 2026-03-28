@@ -5482,7 +5482,7 @@ async def chat_stream(
                 if active_founder_guidance:
                     system_prompt = (system_prompt + "\n\nFounder guidance (temporary, internal):\n" + active_founder_guidance).strip()
                 model_override = ag_model
-                temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else  "temperature", 0.2) or 0.2)
+                temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else 0.2) or 0.2
 
                 llm_task = asyncio.create_task(
                     asyncio.to_thread(
